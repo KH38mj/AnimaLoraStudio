@@ -9,7 +9,9 @@ from __future__ import annotations
 import argparse
 import base64
 import io
+import json
 import os
+import re
 import sys
 import threading
 import time
@@ -33,6 +35,33 @@ DEFAULT_SYSTEM_PROMPT = (
     "You are image captioning expert. Describe the user's picture according "
     "to requested format and instructions."
 )
+ANIMA_JSON_SYSTEM_PROMPT = """You are an anime image captioning assistant for LoRA training.
+
+Return exactly one valid JSON object and no prose outside JSON.
+The field "character" is only for a known character name, never for a description.
+If a character, series, or artist name is not visually explicit, use an empty string.
+Put descriptive details into appearance, tags, environment, and nl."""
+
+ANIMA_JSON_USER_PROMPT = """Produce this exact JSON schema:
+{
+  "quality": "",
+  "count": "1girl|1boy|solo|multiple girls|multiple boys|...",
+  "character": "",
+  "series": "",
+  "artist": "",
+  "appearance": ["hair, eyes, body features, accessories, visible clothing"],
+  "tags": ["pose, expression, framing, composition, medium, art style"],
+  "environment": ["background, location, lighting, weather, time of day, palette"],
+  "nl": "one short English natural-language description"
+}
+
+Rules:
+- Use concise English Danbooru-style tags with spaces, not underscores.
+- Make appearance, tags, environment, and nl useful for LoRA training.
+- Never put a sentence or caption in character, series, or artist.
+- Leave quality empty.
+- Do not include watermark, signature, username, date, score, source, resolution, or quality tags.
+- Do not include explanations, Markdown, comments, or extra keys."""
 
 
 def _torch_dtype(name: str) -> Any:
@@ -73,6 +102,77 @@ def _as_text(value: Any) -> str:
     if isinstance(value, str):
         return value
     return str(value)
+
+
+def _looks_like_anima_json_request(system_texts: list[str], user_texts: list[str]) -> bool:
+    text = "\n".join([*system_texts, *user_texts]).lower()
+    return (
+        "json" in text
+        and "appearance" in text
+        and "environment" in text
+        and '"nl"' in text
+    )
+
+
+def _extract_json_object(text: str) -> dict[str, Any] | None:
+    match = re.search(r"\{.*\}", text, re.S)
+    if not match:
+        return None
+    try:
+        parsed = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _repair_anima_json_text(text: str) -> str:
+    parsed = _extract_json_object(text)
+    if parsed is None:
+        return text
+
+    expected = {
+        "quality",
+        "count",
+        "character",
+        "series",
+        "artist",
+        "appearance",
+        "tags",
+        "environment",
+        "nl",
+    }
+    if not expected.intersection(parsed):
+        return text
+
+    def as_list(value: Any) -> list[str]:
+        if isinstance(value, list):
+            return [str(v).strip() for v in value if str(v).strip()]
+        if isinstance(value, str) and value.strip():
+            return [v.strip() for v in value.split(",") if v.strip()]
+        return []
+
+    out: dict[str, Any] = {
+        "quality": str(parsed.get("quality") or ""),
+        "count": str(parsed.get("count") or ""),
+        "character": str(parsed.get("character") or ""),
+        "series": str(parsed.get("series") or ""),
+        "artist": str(parsed.get("artist") or ""),
+        "appearance": as_list(parsed.get("appearance")),
+        "tags": as_list(parsed.get("tags")),
+        "environment": as_list(parsed.get("environment")),
+        "nl": str(parsed.get("nl") or ""),
+    }
+
+    character = out["character"]
+    if isinstance(character, str) and (
+        len(character) > 80
+        or any(mark in character for mark in (".", " with ", " wearing ", " features "))
+    ):
+        if not out["nl"]:
+            out["nl"] = character
+        out["character"] = ""
+
+    return json.dumps(out, ensure_ascii=False, separators=(",", ":"))
 
 
 def _extract_text_and_image(messages: list[dict[str, Any]]) -> tuple[list[str], list[str], Image.Image | None]:
@@ -209,7 +309,12 @@ class ToriiGateEngine:
                 "total_tokens": 7,
             }
 
-        system = "\n\n".join([self.system_prompt, *system_texts]).strip()
+        wants_anima_json = _looks_like_anima_json_request(system_texts, user_texts)
+        if wants_anima_json:
+            system = "\n\n".join([ANIMA_JSON_SYSTEM_PROMPT, *system_texts]).strip()
+            user_texts = [ANIMA_JSON_USER_PROMPT, *user_texts]
+        else:
+            system = "\n\n".join([self.system_prompt, *system_texts]).strip()
         user_text = "\n\n".join(user_texts).strip()
         if not user_text:
             user_text = "Describe this image."
@@ -258,6 +363,8 @@ class ToriiGateEngine:
             generated,
             skip_special_tokens=True,
         )[0].strip()
+        if wants_anima_json:
+            content = _repair_anima_json_text(content)
         usage = {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
