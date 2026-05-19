@@ -68,6 +68,21 @@ Rules:
 - Keep nl to one short factual English sentence.
 - Do not include explanations, Markdown, comments, or extra keys."""
 
+TORIIGATE_NATIVE_JSON_USER_PROMPT = """# Captioning format:
+Use json-style caption for given image with following structure:
+{"General" : "Here you need to come up with general/common information about picture, overall composition. Stick to shorter phrases and tags instead of long purple prose. Avoid bullets and markdown, write in plain text.",
+"character_1 (put here the name if any)" : "Description of first character."
+"character_2 (if present)" : "Description for second",
+"character_N" : "...",
+"image_effects" : "Mention here effects on image if there are any distinct.",
+"texts" : "Speech bubbles, bars, marks, signs etc. with texts if present, else None",
+"watermarks" : "If present"
+}
+Prefer shorter description and tags.
+
+# Characters on picture:
+Avoid to guess names for characters."""
+
 
 def _torch_dtype(name: str) -> Any:
     if name == "auto":
@@ -152,6 +167,34 @@ def _dedupe(items: list[str], *, limit: int = 16) -> list[str]:
     return out
 
 
+def _drop_generic_clothing_tags(items: list[str]) -> list[str]:
+    generic = {
+        "hat",
+        "cap",
+        "jacket",
+        "coat",
+        "dress",
+        "skirt",
+        "shirt",
+        "blouse",
+        "hoodie",
+        "kimono",
+        "uniform",
+        "necktie",
+        "gloves",
+        "boots",
+        "stockings",
+        "ribbon",
+        "bow",
+    }
+    specific_suffixes = {
+        tag.split(" ", 1)[1]
+        for tag in items
+        if " " in tag and tag.split(" ", 1)[1] in generic
+    }
+    return [tag for tag in items if tag not in specific_suffixes]
+
+
 def _contains_phrase(text: str, phrase: str) -> bool:
     return re.search(rf"\b{re.escape(phrase)}\b", text, re.I) is not None
 
@@ -183,6 +226,43 @@ def _tags_from_description(text: str) -> dict[str, list[str]]:
             appearance.append("blonde hair" if color == "blond" else f"{color} hair")
         if re.search(rf"\b{color}[- ]+eyes\b", lowered):
             appearance.append("gold eyes" if color == "golden" else f"{color} eyes")
+
+    for color in (
+        "black",
+        "white",
+        "brown",
+        "red",
+        "pink",
+        "blue",
+        "green",
+        "purple",
+        "silver",
+        "grey",
+        "gray",
+        "yellow",
+        "gold",
+    ):
+        for garment in (
+            "hat",
+            "cap",
+            "jacket",
+            "coat",
+            "dress",
+            "skirt",
+            "shirt",
+            "blouse",
+            "hoodie",
+            "kimono",
+            "uniform",
+            "necktie",
+            "gloves",
+            "boots",
+            "stockings",
+            "ribbon",
+            "bow",
+        ):
+            if re.search(rf"\b{color}[- ]+{garment}\b", lowered):
+                appearance.append(f"{color} {garment}")
 
     for phrase in (
         "long hair",
@@ -228,7 +308,12 @@ def _tags_from_description(text: str) -> dict[str, list[str]]:
             appearance.append(phrase.replace("thigh-high stockings", "thighhighs"))
 
     tag_phrases = {
-        "looking at viewer": ("looking at the viewer", "staring directly", "gazing at the viewer"),
+        "looking at viewer": (
+            "looking at viewer",
+            "looking at the viewer",
+            "staring directly",
+            "gazing at the viewer",
+        ),
         "smile": ("smile", "smiling"),
         "serious expression": ("serious expression", "serious look"),
         "intense expression": ("intense expression", "intense"),
@@ -276,7 +361,7 @@ def _tags_from_description(text: str) -> dict[str, list[str]]:
             environment.append(tag)
 
     return {
-        "appearance": _dedupe(appearance),
+        "appearance": _drop_generic_clothing_tags(_dedupe(appearance)),
         "tags": _dedupe(tags),
         "environment": _dedupe(environment),
     }
@@ -334,7 +419,18 @@ def _repair_anima_json_text(text: str) -> str:
         and (
             key.lower().startswith("character")
             or key.lower()
-            in {"general", "background", "image_effects", "image effects", "atmosphere", "texts"}
+            in {
+                "general",
+                "main content",
+                "main_content",
+                "background",
+                "image_effects",
+                "image effects",
+                "visual_effects",
+                "visual effects",
+                "atmosphere",
+                "texts",
+            }
         )
     ]
     if not expected.intersection(parsed) and not native_text_keys:
@@ -530,8 +626,8 @@ class ToriiGateEngine:
 
         wants_anima_json = _looks_like_anima_json_request(system_texts, user_texts)
         if wants_anima_json:
-            system = "\n\n".join([ANIMA_JSON_SYSTEM_PROMPT, *system_texts]).strip()
-            user_texts = [ANIMA_JSON_USER_PROMPT, *user_texts]
+            system = self.system_prompt
+            user_texts = [TORIIGATE_NATIVE_JSON_USER_PROMPT]
         else:
             system = "\n\n".join([self.system_prompt, *system_texts]).strip()
         user_text = "\n\n".join(user_texts).strip()
