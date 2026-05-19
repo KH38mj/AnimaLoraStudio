@@ -42,25 +42,30 @@ The field "character" is only for a known character name, never for a descriptio
 If a character, series, or artist name is not visually explicit, use an empty string.
 Put descriptive details into appearance, tags, environment, and nl."""
 
-ANIMA_JSON_USER_PROMPT = """Produce this exact JSON schema:
+ANIMA_JSON_USER_PROMPT = """Look at the image and output this JSON object only:
 {
   "quality": "",
-  "count": "1girl|1boy|solo|multiple girls|multiple boys|...",
+  "count": "",
   "character": "",
   "series": "",
   "artist": "",
-  "appearance": ["hair, eyes, body features, accessories, visible clothing"],
-  "tags": ["pose, expression, framing, composition, medium, art style"],
-  "environment": ["background, location, lighting, weather, time of day, palette"],
-  "nl": "one short English natural-language description"
+  "appearance": [],
+  "tags": [],
+  "environment": [],
+  "nl": ""
 }
 
 Rules:
 - Use concise English Danbooru-style tags with spaces, not underscores.
-- Make appearance, tags, environment, and nl useful for LoRA training.
+- Fill count with visible count tags such as "1girl, solo", "1boy, solo", or "multiple girls".
+- Put hair, eyes, body features, accessories, and visible clothing in appearance.
+- Put pose, expression, framing, composition, medium, and art style in tags.
+- Put background, location, lighting, weather, time of day, and palette in environment.
+- Fill appearance, tags, environment, and nl with useful visible details.
 - Never put a sentence or caption in character, series, or artist.
 - Leave quality empty.
 - Do not include watermark, signature, username, date, score, source, resolution, or quality tags.
+- Keep nl to one short factual English sentence.
 - Do not include explanations, Markdown, comments, or extra keys."""
 
 
@@ -109,26 +114,207 @@ def _looks_like_anima_json_request(system_texts: list[str], user_texts: list[str
     return (
         "json" in text
         and "appearance" in text
-        and "environment" in text
-        and '"nl"' in text
+        and ("environment" in text or "background" in text)
+        and (
+            '"nl"' in text
+            or "natural-language" in text
+            or "natural language" in text
+            or "lora" in text
+            or "danbooru" in text
+        )
     )
 
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:
-    match = re.search(r"\{.*\}", text, re.S)
-    if not match:
-        return None
-    try:
-        parsed = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", text):
+        try:
+            parsed, _ = decoder.raw_decode(text[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _dedupe(items: list[str], *, limit: int = 16) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        tag = re.sub(r"\s+", " ", item.replace("_", " ").strip().lower())
+        tag = tag.strip(" .,;:()[]{}\"'")
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        out.append(tag)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _contains_phrase(text: str, phrase: str) -> bool:
+    return re.search(rf"\b{re.escape(phrase)}\b", text, re.I) is not None
+
+
+def _tags_from_description(text: str) -> dict[str, list[str]]:
+    lowered = text.lower()
+    appearance: list[str] = []
+    tags: list[str] = []
+    environment: list[str] = []
+
+    for color in (
+        "black",
+        "white",
+        "blonde",
+        "blond",
+        "brown",
+        "red",
+        "pink",
+        "blue",
+        "green",
+        "purple",
+        "silver",
+        "grey",
+        "gray",
+        "yellow",
+        "golden",
+    ):
+        if re.search(rf"\b{color}[- ]+hair\b", lowered):
+            appearance.append("blonde hair" if color == "blond" else f"{color} hair")
+        if re.search(rf"\b{color}[- ]+eyes\b", lowered):
+            appearance.append("gold eyes" if color == "golden" else f"{color} eyes")
+
+    for phrase in (
+        "long hair",
+        "short hair",
+        "medium hair",
+        "twintails",
+        "ponytail",
+        "braid",
+        "braids",
+        "bangs",
+        "ahoge",
+        "animal ears",
+        "fox ears",
+        "cat ears",
+        "tail",
+        "horns",
+        "wings",
+        "hat",
+        "cap",
+        "hair ornament",
+        "glasses",
+        "earrings",
+        "ribbon",
+        "bow",
+        "jacket",
+        "coat",
+        "dress",
+        "skirt",
+        "shirt",
+        "blouse",
+        "hoodie",
+        "kimono",
+        "uniform",
+        "sailor uniform",
+        "necktie",
+        "gloves",
+        "boots",
+        "stockings",
+        "thigh-high stockings",
+        "thighhighs",
+    ):
+        if _contains_phrase(lowered, phrase):
+            appearance.append(phrase.replace("thigh-high stockings", "thighhighs"))
+
+    tag_phrases = {
+        "looking at viewer": ("looking at the viewer", "staring directly", "gazing at the viewer"),
+        "smile": ("smile", "smiling"),
+        "serious expression": ("serious expression", "serious look"),
+        "intense expression": ("intense expression", "intense"),
+        "angry": ("angry", "annoyed"),
+        "crying": ("crying", "tears"),
+        "blush": ("blush", "flushed"),
+        "open mouth": ("open mouth", "mouth open"),
+        "closed eyes": ("closed eyes", "eyes closed"),
+        "hands near face": ("hands near", "hands are positioned in front of her face"),
+        "peace sign": ("peace sign",),
+        "sitting": ("sitting", "seated"),
+        "standing": ("standing",),
+        "lying": ("lying", "laying"),
+        "upper body": ("upper body", "bust shot"),
+        "close-up": ("close-up", "close up"),
+        "portrait": ("portrait",),
+        "dynamic pose": ("dynamic pose", "dynamic"),
+        "anime style": ("anime style", "anime artwork", "anime"),
+        "illustration": ("illustration", "artwork"),
+        "chibi": ("chibi",),
+    }
+    for tag, phrases in tag_phrases.items():
+        if any(phrase in lowered for phrase in phrases):
+            tags.append(tag)
+
+    env_phrases = {
+        "simple background": ("simple background", "plain background"),
+        "dark background": ("dark background",),
+        "indoors": ("indoors", "indoor"),
+        "outdoors": ("outdoors", "outdoor"),
+        "sky": ("sky",),
+        "cloudy sky": ("cloudy sky", "clouds"),
+        "night": ("night", "nighttime"),
+        "sunset": ("sunset",),
+        "city": ("city", "urban"),
+        "forest": ("forest",),
+        "room": ("room", "bedroom", "living room"),
+        "dramatic lighting": ("dramatic lighting",),
+        "soft lighting": ("soft lighting", "soft light"),
+        "warm colors": ("warm color", "warm palette"),
+        "cool colors": ("cool color", "cool palette"),
+    }
+    for tag, phrases in env_phrases.items():
+        if any(phrase in lowered for phrase in phrases):
+            environment.append(tag)
+
+    return {
+        "appearance": _dedupe(appearance),
+        "tags": _dedupe(tags),
+        "environment": _dedupe(environment),
+    }
+
+
+def _infer_count(text: str) -> str:
+    lowered = text.lower()
+    if any(phrase in lowered for phrase in ("multiple girls", "several girls", "three girls", "two girls")):
+        return "multiple girls"
+    if any(phrase in lowered for phrase in ("multiple boys", "several boys", "three boys", "two boys")):
+        return "multiple boys"
+    if any(phrase in lowered for phrase in ("multiple characters", "several characters", "two characters")):
+        return "multiple"
+    if re.search(r"\b(girl|woman|female)\b", lowered):
+        return "1girl, solo"
+    if re.search(r"\b(boy|man|male)\b", lowered):
+        return "1boy, solo"
+    if "solo" in lowered:
+        return "solo"
+    return ""
+
+
+def _shorten_sentence(text: str) -> str:
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return ""
+    match = re.match(r"(.{1,220}?[.!?])(?:\s|$)", text)
+    if match:
+        return match.group(1).strip()
+    return text[:220].rstrip(" ,;:") + ("." if len(text) > 220 else "")
 
 
 def _repair_anima_json_text(text: str) -> str:
     parsed = _extract_json_object(text)
     if parsed is None:
-        return text
+        parsed = {"nl": text}
+    if isinstance(parsed.get("ai_output"), dict):
+        parsed = {**parsed, **parsed["ai_output"]}
 
     expected = {
         "quality",
@@ -141,15 +327,33 @@ def _repair_anima_json_text(text: str) -> str:
         "environment",
         "nl",
     }
-    if not expected.intersection(parsed):
-        return text
+    native_text_keys = [
+        key
+        for key, value in parsed.items()
+        if isinstance(value, str)
+        and (
+            key.lower().startswith("character")
+            or key.lower()
+            in {"general", "background", "image_effects", "image effects", "atmosphere", "texts"}
+        )
+    ]
+    if not expected.intersection(parsed) and not native_text_keys:
+        parsed = {"nl": text}
 
     def as_list(value: Any) -> list[str]:
         if isinstance(value, list):
-            return [str(v).strip() for v in value if str(v).strip()]
+            return _dedupe([str(v) for v in value if str(v).strip()])
         if isinstance(value, str) and value.strip():
-            return [v.strip() for v in value.split(",") if v.strip()]
+            return _dedupe([v for v in re.split(r"[,;\n]+", value) if v.strip()])
         return []
+
+    native_text = "\n".join(str(parsed[key]) for key in native_text_keys).strip()
+    all_text = "\n".join(
+        str(value)
+        for value in [native_text, parsed.get("nl"), text]
+        if isinstance(value, str) and value.strip()
+    )
+    inferred = _tags_from_description(all_text)
 
     out: dict[str, Any] = {
         "quality": str(parsed.get("quality") or ""),
@@ -162,6 +366,12 @@ def _repair_anima_json_text(text: str) -> str:
         "environment": as_list(parsed.get("environment")),
         "nl": str(parsed.get("nl") or ""),
     }
+    if not out["nl"]:
+        for key in ("general", "General", "character_1", "Character_1", "background", "Background"):
+            value = parsed.get(key)
+            if isinstance(value, str) and value.strip():
+                out["nl"] = value
+                break
 
     character = out["character"]
     if isinstance(character, str) and (
@@ -171,6 +381,15 @@ def _repair_anima_json_text(text: str) -> str:
         if not out["nl"]:
             out["nl"] = character
         out["character"] = ""
+
+    if not out["count"]:
+        out["count"] = _infer_count(all_text)
+    for key in ("appearance", "tags", "environment"):
+        if not out[key]:
+            out[key] = inferred[key]
+    if out["tags"] and "anime style" not in out["tags"]:
+        out["tags"] = _dedupe([*out["tags"], "anime style"])
+    out["nl"] = _shorten_sentence(str(out["nl"]))
 
     return json.dumps(out, ensure_ascii=False, separators=(",", ":"))
 
