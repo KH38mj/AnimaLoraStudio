@@ -240,6 +240,32 @@ def _split_phrases(value: Any) -> list[str]:
     return _dedupe(phrases, limit=32)
 
 
+def _is_sentence_like(phrase: str) -> bool:
+    words = phrase.split()
+    return (
+        len(words) > 8
+        or "." in phrase
+        or _has_any_phrase(
+            phrase,
+            (
+                " she ",
+                " he ",
+                " they ",
+                " with a ",
+                " with an ",
+                " against a ",
+                " around her ",
+                " around his ",
+                " near her ",
+                " near his ",
+                "enhancing",
+                "casting",
+                "adding",
+            ),
+        )
+    )
+
+
 def _has_any_phrase(text: str, phrases: tuple[str, ...]) -> bool:
     lowered = text.lower()
     return any(phrase in lowered for phrase in phrases)
@@ -255,6 +281,8 @@ def _is_environment_phrase(phrase: str) -> bool:
             "lighting",
             "light",
             "shadow",
+            "hue",
+            "hues",
             "palette",
             "color palette",
             "atmosphere",
@@ -277,6 +305,8 @@ def _is_environment_phrase(phrase: str) -> bool:
             "snow",
             "thread",
             "abstract",
+            "moody",
+            "atmospheric",
         ),
     )
 
@@ -351,6 +381,8 @@ def _is_action_or_style_phrase(phrase: str) -> bool:
             "pose",
             "hand",
             "arm",
+            "scissor",
+            "cutting",
             "sitting",
             "standing",
             "lying",
@@ -372,6 +404,7 @@ def _is_action_or_style_phrase(phrase: str) -> bool:
             "motion blur",
             "glitch",
             "fisheye",
+            "glow",
         ),
     )
 
@@ -379,6 +412,22 @@ def _is_action_or_style_phrase(phrase: str) -> bool:
 def _route_native_phrases(parsed: dict[str, Any]) -> dict[str, list[str]]:
     routed: dict[str, list[str]] = {"appearance": [], "tags": [], "environment": []}
     count: list[str] = []
+    color_words = {
+        "black",
+        "white",
+        "red",
+        "orange",
+        "yellow",
+        "green",
+        "blue",
+        "purple",
+        "pink",
+        "brown",
+        "gray",
+        "grey",
+        "silver",
+        "gold",
+    }
 
     for key, value in parsed.items():
         key_norm = key.lower().replace("_", " ").strip()
@@ -390,6 +439,8 @@ def _route_native_phrases(parsed: dict[str, Any]) -> dict[str, list[str]]:
             for phrase in phrases:
                 if _is_count_phrase(phrase):
                     count.append(phrase)
+                elif _is_sentence_like(phrase):
+                    continue
                 elif _is_environment_phrase(phrase):
                     routed["environment"].append(phrase)
                 elif _is_action_or_style_phrase(phrase):
@@ -399,17 +450,21 @@ def _route_native_phrases(parsed: dict[str, Any]) -> dict[str, list[str]]:
             continue
 
         if key_norm in {"background", "atmosphere"}:
-            routed["environment"].extend(phrases)
+            routed["environment"].extend(phrase for phrase in phrases if not _is_sentence_like(phrase))
             continue
 
         if key_norm in {"image effects", "visual effects"}:
-            routed["tags"].extend(phrases)
+            routed["tags"].extend(phrase for phrase in phrases if not _is_sentence_like(phrase))
             continue
 
         if key_norm in {"general", "main content"}:
             for phrase in phrases:
                 if _is_count_phrase(phrase):
                     count.append(phrase)
+                elif phrase.strip().lower() in color_words:
+                    routed["environment"].append(f"{phrase.strip().lower()} palette")
+                elif _is_sentence_like(phrase):
+                    continue
                 elif _is_environment_phrase(phrase):
                     routed["environment"].append(phrase)
                 elif _is_appearance_phrase(phrase):
@@ -553,6 +608,8 @@ def _tags_from_description(text: str) -> dict[str, list[str]]:
         "open mouth": ("open mouth", "mouth open"),
         "closed eyes": ("closed eyes", "eyes closed"),
         "hands near face": ("hands near", "hands are positioned in front of her face"),
+        "holding scissors": ("holds a pair of silver scissors", "holding scissors", "scissors"),
+        "cutting hair": ("cutting her hair", "cutting hair"),
         "peace sign": ("peace sign",),
         "sitting": ("sitting", "seated"),
         "standing": ("standing",),
@@ -581,6 +638,11 @@ def _tags_from_description(text: str) -> dict[str, list[str]]:
         "city": ("city", "urban"),
         "forest": ("forest",),
         "room": ("room", "bedroom", "living room"),
+        "red threads": ("red thread", "red threads", "orange-red strings", "strings weave"),
+        "moody lighting": ("moody", "moody lighting"),
+        "dramatic shadows": ("dramatic shadow", "dramatic shadows"),
+        "blue lighting": ("blue hue", "blue hues", "blue lighting"),
+        "purple lighting": ("purple hue", "purple hues", "purple lighting"),
         "dramatic lighting": ("dramatic lighting",),
         "soft lighting": ("soft lighting", "soft light"),
         "warm colors": ("warm color", "warm palette"),
