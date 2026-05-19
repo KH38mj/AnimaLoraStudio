@@ -70,15 +70,16 @@ Rules:
 
 TORIIGATE_NATIVE_JSON_USER_PROMPT = """# Captioning format:
 Use json-style caption for given image with following structure:
-{"General" : "Here you need to come up with general/common information about picture, overall composition. Stick to shorter phrases and tags instead of long purple prose. Avoid bullets and markdown, write in plain text.",
-"character_1 (put here the name if any)" : "Description of first character."
-"character_2 (if present)" : "Description for second",
+{"General" : "8-20 comma-separated short visual phrases about framing, pose, expression, composition, style, medium, lighting, background, palette, and effects. Avoid bullets and markdown, write in plain text.",
+"character_1 (put here the name if any)" : "8-20 comma-separated short phrases about visible hair, eyes, face, body features, accessories, clothing, pose, and expression."
+"character_2 (if present)" : "Same for second character",
 "character_N" : "...",
-"image_effects" : "Mention here effects on image if there are any distinct.",
+"background" : "3-12 comma-separated short phrases about location, background objects, lighting, weather, colors, and atmosphere.",
+"image_effects" : "3-8 comma-separated short phrases about visual effects if distinct.",
 "texts" : "Speech bubbles, bars, marks, signs etc. with texts if present, else None",
 "watermarks" : "If present"
 }
-Prefer shorter description and tags.
+Prefer useful LoRA training details. Do not be too brief. Use concise English Danbooru-style phrases with spaces, not underscores.
 
 # Characters on picture:
 Avoid to guess names for characters."""
@@ -114,6 +115,19 @@ def _decode_image_url(value: str) -> Image.Image:
         return Image.open(path).convert("RGB")
 
     raise HTTPException(status_code=400, detail="Unsupported or missing image URL")
+
+
+def _resize_image(image: Image.Image, max_pixels: float) -> Image.Image:
+    if max_pixels <= 0:
+        return image
+    pixel_budget = int(max_pixels * 1_000_000)
+    if pixel_budget <= 0 or image.width * image.height <= pixel_budget:
+        return image
+
+    scale = (pixel_budget / float(image.width * image.height)) ** 0.5
+    width = max(1, int(image.width * scale))
+    height = max(1, int(image.height * scale))
+    return image.resize((width, height), Image.Resampling.LANCZOS)
 
 
 def _as_text(value: Any) -> str:
@@ -193,6 +207,222 @@ def _drop_generic_clothing_tags(items: list[str]) -> list[str]:
         if " " in tag and tag.split(" ", 1)[1] in generic
     }
     return [tag for tag in items if tag not in specific_suffixes]
+
+
+def _split_phrases(value: Any) -> list[str]:
+    if isinstance(value, list):
+        raw_parts = [str(item) for item in value]
+    elif isinstance(value, str):
+        raw_parts = re.split(r"[,;\n]+", value)
+    else:
+        return []
+
+    phrases: list[str] = []
+    empty_markers = {
+        "none",
+        "n/a",
+        "no",
+        "no text",
+        "no texts",
+        "no visible text",
+        "no watermark",
+        "not present",
+        "nothing",
+    }
+    for part in raw_parts:
+        phrase = re.sub(r"\s+", " ", part.replace("_", " ")).strip()
+        phrase = phrase.strip(" .,:;()[]{}\"'")
+        if not phrase:
+            continue
+        if phrase.lower() in empty_markers:
+            continue
+        phrases.append(phrase)
+    return _dedupe(phrases, limit=32)
+
+
+def _has_any_phrase(text: str, phrases: tuple[str, ...]) -> bool:
+    lowered = text.lower()
+    return any(phrase in lowered for phrase in phrases)
+
+
+def _is_environment_phrase(phrase: str) -> bool:
+    if _is_appearance_phrase(phrase):
+        return False
+    return _has_any_phrase(
+        phrase,
+        (
+            "background",
+            "lighting",
+            "light",
+            "shadow",
+            "palette",
+            "color palette",
+            "atmosphere",
+            "indoors",
+            "indoor",
+            "outdoors",
+            "outdoor",
+            "sky",
+            "cloud",
+            "sunset",
+            "night",
+            "city",
+            "urban",
+            "forest",
+            "room",
+            "street",
+            "school",
+            "water",
+            "rain",
+            "snow",
+            "thread",
+            "abstract",
+        ),
+    )
+
+
+def _is_appearance_phrase(phrase: str) -> bool:
+    return _has_any_phrase(
+        phrase,
+        (
+            "hair",
+            "eye",
+            "skin",
+            "face",
+            "body",
+            "ears",
+            "tail",
+            "horn",
+            "wing",
+            "hat",
+            "cap",
+            "glasses",
+            "ribbon",
+            "bow",
+            "jacket",
+            "coat",
+            "dress",
+            "skirt",
+            "shirt",
+            "blouse",
+            "hoodie",
+            "kimono",
+            "uniform",
+            "necktie",
+            "tie",
+            "gloves",
+            "boots",
+            "stockings",
+            "thighhighs",
+            "collar",
+            "choker",
+            "necklace",
+            "bracelet",
+            "armor",
+            "accessory",
+            "clothing",
+            "wearing",
+        ),
+    )
+
+
+def _is_count_phrase(phrase: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"(?:solo|multiple|[1-9]\d*\s*(?:girl|girls|boy|boys)|multiple\s+(?:girls|boys|characters))",
+            phrase.strip().lower(),
+        )
+    )
+
+
+def _is_action_or_style_phrase(phrase: str) -> bool:
+    return _has_any_phrase(
+        phrase,
+        (
+            "looking",
+            "gaze",
+            "staring",
+            "smile",
+            "expression",
+            "mouth",
+            "blush",
+            "tears",
+            "crying",
+            "pose",
+            "hand",
+            "arm",
+            "sitting",
+            "standing",
+            "lying",
+            "upper body",
+            "close-up",
+            "close up",
+            "portrait",
+            "composition",
+            "framing",
+            "angle",
+            "view",
+            "perspective",
+            "dynamic",
+            "anime",
+            "illustration",
+            "digital art",
+            "chromatic aberration",
+            "depth of field",
+            "motion blur",
+            "glitch",
+            "fisheye",
+        ),
+    )
+
+
+def _route_native_phrases(parsed: dict[str, Any]) -> dict[str, list[str]]:
+    routed: dict[str, list[str]] = {"appearance": [], "tags": [], "environment": []}
+    count: list[str] = []
+
+    for key, value in parsed.items():
+        key_norm = key.lower().replace("_", " ").strip()
+        phrases = _split_phrases(value)
+        if not phrases:
+            continue
+
+        if key_norm.startswith("character"):
+            for phrase in phrases:
+                if _is_count_phrase(phrase):
+                    count.append(phrase)
+                elif _is_environment_phrase(phrase):
+                    routed["environment"].append(phrase)
+                elif _is_action_or_style_phrase(phrase):
+                    routed["tags"].append(phrase)
+                else:
+                    routed["appearance"].append(phrase)
+            continue
+
+        if key_norm in {"background", "atmosphere"}:
+            routed["environment"].extend(phrases)
+            continue
+
+        if key_norm in {"image effects", "visual effects"}:
+            routed["tags"].extend(phrases)
+            continue
+
+        if key_norm in {"general", "main content"}:
+            for phrase in phrases:
+                if _is_count_phrase(phrase):
+                    count.append(phrase)
+                elif _is_environment_phrase(phrase):
+                    routed["environment"].append(phrase)
+                elif _is_appearance_phrase(phrase):
+                    routed["appearance"].append(phrase)
+                else:
+                    routed["tags"].append(phrase)
+
+    return {
+        "appearance": _drop_generic_clothing_tags(_dedupe(routed["appearance"], limit=24)),
+        "tags": _dedupe(routed["tags"], limit=24),
+        "environment": _dedupe(routed["environment"], limit=24),
+        "count": _dedupe(count, limit=4),
+    }
 
 
 def _contains_phrase(text: str, phrase: str) -> bool:
@@ -384,6 +614,27 @@ def _infer_count(text: str) -> str:
     return ""
 
 
+def _merge_count_tags(existing: str, routed: list[str], all_text: str) -> str:
+    pieces = _dedupe([*re.split(r"[,;]\s*", existing), *routed], limit=6)
+    lowered_text = all_text.lower()
+
+    gendered = next((tag for tag in pieces if tag in {"1girl", "1boy"}), "")
+    if not gendered:
+        if re.search(r"\b(girl|woman|female)\b", lowered_text):
+            gendered = "1girl"
+        elif re.search(r"\b(boy|man|male)\b", lowered_text):
+            gendered = "1boy"
+
+    has_solo = "solo" in pieces or "solo" in lowered_text
+    if gendered and has_solo:
+        return f"{gendered}, solo"
+    if gendered:
+        return gendered
+    if pieces:
+        return ", ".join(pieces)
+    return _infer_count(all_text)
+
+
 def _shorten_sentence(text: str) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     if not text:
@@ -450,6 +701,7 @@ def _repair_anima_json_text(text: str) -> str:
         if isinstance(value, str) and value.strip()
     )
     inferred = _tags_from_description(all_text)
+    routed = _route_native_phrases(parsed)
 
     out: dict[str, Any] = {
         "quality": str(parsed.get("quality") or ""),
@@ -478,11 +730,10 @@ def _repair_anima_json_text(text: str) -> str:
             out["nl"] = character
         out["character"] = ""
 
-    if not out["count"]:
-        out["count"] = _infer_count(all_text)
+    out["count"] = _merge_count_tags(out["count"], routed.get("count", []), all_text)
     for key in ("appearance", "tags", "environment"):
-        if not out[key]:
-            out[key] = inferred[key]
+        out[key] = _dedupe([*out[key], *routed[key], *inferred[key]], limit=24)
+    out["appearance"] = _drop_generic_clothing_tags(out["appearance"])
     if out["tags"] and "anime style" not in out["tags"]:
         out["tags"] = _dedupe([*out["tags"], "anime style"])
     out["nl"] = _shorten_sentence(str(out["nl"]))
@@ -548,6 +799,7 @@ class ToriiGateEngine:
         attn_implementation: str,
         min_pixels: int,
         default_max_tokens: int,
+        max_pixels: float,
     ) -> None:
         self.model_dir = model_dir
         self.served_model_name = served_model_name
@@ -556,6 +808,7 @@ class ToriiGateEngine:
         self.attn_implementation = attn_implementation
         self.min_pixels = min_pixels
         self.default_max_tokens = default_max_tokens
+        self.max_pixels = max_pixels
         self.lock = threading.Lock()
         self.system_prompt = DEFAULT_SYSTEM_PROMPT
         self.model: Qwen3_5ForConditionalGeneration | None = None
@@ -623,6 +876,7 @@ class ToriiGateEngine:
                 "completion_tokens": 7,
                 "total_tokens": 7,
             }
+        image = _resize_image(image, self.max_pixels)
 
         wants_anima_json = _looks_like_anima_json_request(system_texts, user_texts)
         if wants_anima_json:
@@ -779,6 +1033,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=int(os.environ.get("TORIIGATE_MAX_TOKENS", "512")),
     )
+    parser.add_argument(
+        "--max-pixels",
+        type=float,
+        default=float(os.environ.get("TORIIGATE_MAX_PIXELS", "1.0")),
+        help="Resize input images above this megapixel budget before captioning; <=0 disables resizing",
+    )
     return parser.parse_args()
 
 
@@ -792,6 +1052,7 @@ def main() -> None:
         attn_implementation=args.attn_implementation,
         min_pixels=args.min_pixels,
         default_max_tokens=args.default_max_tokens,
+        max_pixels=args.max_pixels,
     )
     engine.load()
     app = create_app(engine)
