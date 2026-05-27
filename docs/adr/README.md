@@ -15,6 +15,7 @@
 | 0007 | [Project / Version / Task 生命周期重构](0007-project-version-lifecycle-refactor.md) | Proposed | 2026-05-23 |
 | 0008 | [studio/ 4 层重构（0.11.0）](0008-studio-restructure-0.11.0.md) | Accepted | 2026-05-28 |
 | 0009 | [统一日志 + 错误体系（0.12.0）](0009-logging-error-system.md) | Accepted | 2026-05-28 |
+| 0010 | [LoRA 评估指标体系与可审查 PR 拆分](0010-lora-eval-metrics.md) | Proposed | 2026-05-27 |
 
 ## 状态值
 
