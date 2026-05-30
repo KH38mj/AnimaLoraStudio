@@ -66,6 +66,34 @@ LoRA eval 更接近 checkpoint 后异步运行的 validation job，不是训练 
 - 可加“每 N epoch / N checkpoint 评估一次”选项，默认关闭或保守开启；
 - 若训练仍在占用 GPU，eval job 应排队等待或走 CPU fallback，而不是与训练争抢显存。
 
+### Eval Settings 与默认开关
+
+新增指标不应默认强制全量开启。后续需要全局 / 项目级 eval settings 控制成本与触发策略：
+
+- 是否启用 checkpoint validation metrics；
+- 触发频率：每 N 个 checkpoint、每 N epoch、训练结束后，或手动补跑；
+- 启用哪些指标；
+- GPU 忙时排队、跳过还是 CPU fallback；
+- 最大并发 eval job 数；
+- 默认 sample preset：resolution、steps、cfg / guidance、sampler、seed 数量等；
+- 默认 reference 策略：从训练集自动抽样 N 张，或后续使用 held-out reference。
+
+eval settings 与 manifest 的关系：
+
+- eval settings 是默认模板和开关，适合放在全局 / 项目设置页；
+- 某个 version 第一次开始 validation 时，根据当时的 settings 生成或确认 manifest；
+- manifest 保存后冻结该 version 的具体 reference 与 sample preset；
+- 后续 settings 改动只影响新 manifest，不应改变旧 checkpoint 曲线的定义。
+
+保守默认值：
+
+- 不阻塞 training step；
+- checkpoint 保存后异步排队；
+- 高成本指标默认关闭；
+- 低成本指标可以作为较早可选项；
+- monitor UI 明确展示 eval job 的 pending / running / failed / unavailable 状态；
+- 不偷偷默认全开会显著增加训练耗时或显存占用的指标。
+
 ### Manifest 角色与作用域
 
 manifest 不是训练配置，也不是训练 monitor 中实时变化的参数记录。它是 version 级的 frozen validation input contract：
