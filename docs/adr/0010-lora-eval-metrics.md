@@ -4,7 +4,7 @@
 **日期**：2026-05-27
 **决策者**：@WalkingMeatAxolotl
 
-> **维护约定**：本 ADR 定义 LoRA 训练后评估体系的目标、边界和 PR 拆分。
+> **维护约定**：本 ADR 定义 LoRA checkpoint validation metrics 的目标、边界和 PR 拆分。
 > 当前 review unit 合并 PR 0 + PR 1，只落地 eval manifest 协议/API；模型依赖、UI、采样 runner 和具体指标实现都在后续 PR 分别落地。
 > 如果后续指标实测与本文假设冲突，在末尾追加 Addendum，不改写初版决策。
 
@@ -24,9 +24,9 @@ DINO-I / CLIP-I / CLIP-T / diversity / copy-risk 等组合指标。它们适合�
 
 ## 目标
 
-1. 给每个 version / checkpoint 建立可重复的评估协议：同一批 held-out 图、caption、prompt、seed。
-2. 在 checkpoint 后异步生成 eval samples，保留 grid、单图和 metadata，方便人工对比。
-3. 逐步接入自动指标，分别回答：
+1. 给每个 version 建立可重复的 validation 协议：同一批 reference 图、caption、prompt、seed、生成参数。
+2. 在 checkpoint 保存后异步生成 eval samples，保留 grid、单图和 metadata，方便在 monitor UI 中随训练进度对比。
+3. 逐步接入自动指标，像 loss / learning rate / sample 图一样展示随 checkpoint 变化的趋势，并分别回答：
    - 是否还听 prompt；
    - 是否学到主体 / 风格；
    - 是否出现模式塌缩；
@@ -49,21 +49,54 @@ DINO-I / CLIP-I / CLIP-T / diversity / copy-risk 等组合指标。它们适合�
 
 ### 评估运行方式
 
-LoRA eval 是 checkpoint 后的独立任务，不是训练 step 的一部分：
+LoRA eval 更接近 checkpoint 后异步运行的 validation job，不是训练 step 内同步执行的逻辑：
 
-1. 训练任务保存 checkpoint 或用户手动触发后，提交 eval job；
+1. 训练任务保存 checkpoint 后，按策略提交 eval job；用户也可以手动补跑某个 checkpoint；
 2. eval job 读取固定 manifest，调用既有推理能力生成样图；
 3. 指标模型在 eval job 内按需加载，用完卸载；
 4. real image embeddings 可缓存，checkpoint 之间只重算 generated embeddings；
-5. eval job 可取消，可低频运行，可在 CPU / low-vram 模式下降级；
-6. UI 明确标注评估会额外占用时间 / 显存。
+5. eval job 可取消、可排队、可低频运行，可在 CPU / low-vram 模式下降级；
+6. monitor UI 展示同一套 validation 输入下的 sample 图、metric 曲线和风险提示；
+7. UI 明确标注评估会额外占用时间 / 显存。
 
 默认策略：
 
 - 训练时不自动抢 GPU 跑指标；
-- 初期仅手动触发或在训练结束后触发；
-- 后续可加“每 N epoch / N checkpoint 评估一次”选项，默认关闭；
+- 初期可先做手动触发或训练结束后补跑，后续再接 checkpoint 保存后的自动异步触发；
+- 可加“每 N epoch / N checkpoint 评估一次”选项，默认关闭或保守开启；
 - 若训练仍在占用 GPU，eval job 应排队等待或走 CPU fallback，而不是与训练争抢显存。
+
+### Manifest 角色与作用域
+
+manifest 不是训练配置，也不是训练 monitor 中实时变化的参数记录。它是 version 级的 frozen validation input contract：
+
+- 同一个 version 的多个 checkpoint 共用同一份 manifest，保证 metric 曲线和样图可比较；
+- 不同 version 默认各自有自己的 manifest，因为训练集、caption、触发词、分辨率和目标风格可能不同；
+- 全局 / 项目级 eval 设置可以作为“创建新 manifest 时的默认模板”，但不应在评估时被实时读取为 source of truth；
+- 一旦 manifest 保存，后续全局默认值变化不应改变旧 checkpoint 的评估定义。
+
+manifest 仍然有必要落盘，而不是只放在 cache 或临时 sample 参数里，原因是：
+
+- sample runner、metric runner、monitor UI 和后续补跑任务需要跨 task 读取同一套输入；
+- 用户可能需要查看、复制、编辑或导出某个 version 的 validation 协议；
+- cache 更适合保存 derived data，例如 embeddings、生成图索引和 metrics result；manifest 是用户可理解、可复现的输入定义。
+
+### Sample Preset 与 Eval Reference
+
+为避免与普通 sample 功能混淆，eval 输入分成两层：
+
+1. **sample preset**：记录如何生成 eval sample，例如 prompt、seed、cfg / guidance、steps、sampler、resolution、negative prompt、LoRA scale。
+2. **eval reference**：记录指标拿什么做参考，例如 reference images、captions、reference source、copy-risk nearest-neighbor pool。
+
+第一版 reference 来源按“自动可用”优先：
+
+- 默认从当前 version 的训练集自动固定抽样，用户无需上传图片；
+- prompt 默认来自 caption / trigger words，seed 与生成参数来自 eval preset 默认值；
+- 用户后续可以在 UI 或 API 中手动选择训练集图片、编辑 prompts / seeds / generation params；
+- 更严格的 held-out reference（训练集外上传图片或训练前预留 validation set）作为后续高级选项；
+- manifest 需要记录 reference source，例如 `train_auto`、`train_manual`、`heldout_upload`，避免把训练集 reference 的结果误读为泛化能力。
+
+来自训练集的 reference 可以回答“是否学到训练集里的主体 / 风格”，也可作为 SSCD copy-risk 的 nearest-neighbor pool；但它不能单独证明泛化。若要评估泛化，需要后续支持 held-out reference。
 
 ### 数据协议
 
@@ -85,10 +118,8 @@ studio_data/projects/{id}-{slug}/versions/{label}/eval/
 manifest 记录：
 
 - version / project 标识；
-- held-out image path + caption path；
-- eval prompts；
-- seeds；
-- generation params（尺寸、steps、cfg / guidance、sampler、LoRA scale 等）；
+- eval reference：reference image path、caption path、reference source、copy-risk pool 标记；
+- sample preset：eval prompts、seeds、generation params（尺寸、steps、cfg / guidance、sampler、LoRA scale 等）；
 - manifest schema version；
 - 创建时间和来源（自动抽样 / 用户选择）。
 
@@ -119,8 +150,8 @@ manifest 记录：
 
 | PR | 范围 | 明确不做 | 阻塞关系 |
 |---|---|---|---|
-| 0 + 1（当前 PR） | 本 ADR + 文档索引 + Eval manifest：固定 held-out images / captions / prompts / seeds / metadata | 不生成图、不算指标、不做 UI | 无 |
-| 2 | Eval sample runner：按 manifest 对 checkpoint 出图，保存 grid / 单图 / metadata | 不接 CLIP / DINO / CMMD | 0 + 1 |
+| 0 + 1（当前 PR） | 本 ADR + 文档索引 + Eval manifest：固定 eval reference 与 sample preset | 不生成图、不算指标、不做 UI | 无 |
+| 2 | Eval sample runner：checkpoint 保存后按 manifest 对 checkpoint 出图，保存 grid / 单图 / metadata | 不接 CLIP / DINO / CMMD | 0 + 1 |
 | 3 | Metric result schema：定义 metrics.json、embedding cache 目录、API 返回格式、空状态 UI | 不实现具体指标 | 2 |
 | 4 | CLIP-T / CLIP-I | 不做 DINO / diversity / copy-risk | 3 |
 | 5 | DINO-I | 不改 CLIP 逻辑、不做诊断 | 3, 4 |
@@ -159,7 +190,8 @@ manifest 记录：
 
 ### B：训练结束后手动跑一次完整评估
 
-部分采纳。第一阶段以手动 / 结束后触发为默认，后续再做低频自动触发。
+部分采纳。手动 / 结束后触发适合作为第一阶段和补跑入口，但不是最终主线。
+最终产品形态应更接近训练 monitor 中随 checkpoint 更新的 validation metrics。
 
 ### C：checkpoint 后异步 eval job（采纳）
 
@@ -169,6 +201,7 @@ manifest 记录：
 - 可排队、可取消、可 CPU fallback；
 - 指标失败不影响训练产物；
 - 与现有 Queue / Test / daemon 心智接近；
+- 结果可以像 loss / learning rate / sample 图一样进入 monitor 趋势视图；
 - 便于按 PR 分层接入指标。
 
 缺点：
@@ -191,7 +224,7 @@ manifest 记录：
 
 - 后续实现有清晰边界，不会重演大 diff 难审；
 - 每个指标都能独立验证是否对 Anima LoRA 有用；
-- 训练主路径保持稳定；
+- 训练主路径保持稳定，同时 monitor 可以逐步展示 validation 曲线；
 - 用户可以同时看样图、趋势和风险提示；
 - copy-risk 与 subject fidelity 分离，避免把背图误判为好拟合。
 
@@ -200,7 +233,7 @@ manifest 记录：
 - 需要管理额外模型依赖和缓存体积；
 - 指标阈值必须在二次元 / Anima 数据上重新校准；
 - 评估结果只能辅助决策，不能替代人工看图；
-- 若未来自动触发 eval，需要与 Queue GPU 调度策略对齐。
+- 自动触发 eval 需要与 Queue GPU 调度策略对齐。
 
 ## 验收策略
 
@@ -211,6 +244,7 @@ manifest 记录：
 - 不新增依赖；
 - 不生成样图、不计算指标、不改 UI；
 - GET manifest 不隐式写文件，POST/PUT 才落盘；
+- manifest 明确区分 eval reference 与 sample preset，并说明默认 reference 来源；
 - 实施计划明确到每个后续 PR 的范围和不在范围。
 
 后续 PR 的共同验收：
