@@ -4,8 +4,8 @@
 **日期**：2026-05-27
 **决策者**：@WalkingMeatAxolotl
 
-> **维护约定**：本 ADR 定义 LoRA checkpoint validation metrics 的目标、边界和 PR 拆分。
-> 当前 review unit 合并 PR 0 + PR 1，只落地 eval manifest 协议/API；模型依赖、UI、采样 runner 和具体指标实现都在后续 PR 分别落地。
+> **维护约定**：本 ADR 定义 LoRA checkpoint validation metrics 的目标、边界和可审查实现步骤。
+> 维护者已反馈这组 eval 能力可以作为同一个功能在 PR #138 内连续测试和审查；因此当前实现用多个小 commit / follow-up step 叠在同一个 PR 中推进，仍保持每一步边界清晰。
 > 如果后续指标实测与本文假设冲突，在末尾追加 Addendum，不改写初版决策。
 
 ## 背景
@@ -37,7 +37,6 @@ DINO-I / CLIP-I / CLIP-T / diversity / copy-risk 等组合指标。它们适合�
 
 ## 不在范围
 
-- 不在当前 review unit 引入采样 runner、指标模型或 UI。
 - 不把指标同步塞进训练 loop。
 - 不默认启用高成本评估。
 - 不在第一阶段做自动早停。
@@ -133,12 +132,10 @@ manifest 仍然有必要落盘，而不是只放在 cache 或临时 sample 参�
 ```
 studio_data/projects/{id}-{slug}/versions/{label}/eval/
 ├── manifest.json
-├── samples/{checkpoint_id}/
-│   ├── images/
-│   ├── grid.jpg
-│   └── generation_metadata.json
-├── metrics/{checkpoint_id}/
-│   └── metrics.json
+├── samples/{run_id}/
+│   ├── run.json
+│   ├── metrics.json
+│   └── images/
 └── cache/
     └── embeddings/
 ```
@@ -150,6 +147,8 @@ manifest 记录：
 - sample preset：eval prompts、seeds、generation params（尺寸、steps、cfg / guidance、sampler、LoRA scale 等）；
 - manifest schema version；
 - 创建时间和来源（自动抽样 / 用户选择）。
+
+`metrics.json` 跟随 sample run 存放，而不是另建并行 checkpoint 目录，原因是后续 CLIP / DINO / SSCD / CMMD runner 都需要引用同一批 generated images、manifest digest、checkpoint 身份和 generation metadata。run 级目录能让样图、指标结果与缓存索引共享一个稳定的 `run_id`。
 
 ### 指标分层
 
@@ -172,15 +171,15 @@ manifest 记录：
 - DINO-I 高但 diversity 降、CLIP-T 降：疑似过拟合或触发词绑死；
 - paired CMMD² 到低点后回升：可能进入过拟合区间，需要人工看样图确认。
 
-### 可审查 PR 拆分
+### 可审查实现步骤
 
-吸取 PR #18 的经验，禁止把评估体系做成一个大 PR。每个 PR 只回答一个问题，尽量只引入一个新概念、依赖或指标。
+吸取 PR #18 的经验，禁止把评估体系做成一个无法审查的大块。即使维护者希望当前 eval feature 保持在同一个 PR #138 中测试和合并，每个 commit / follow-up step 仍只回答一个问题，尽量只引入一个新概念、依赖或指标。
 
-| PR | 范围 | 明确不做 | 阻塞关系 |
+| Step | 范围 | 明确不做 | 阻塞关系 |
 |---|---|---|---|
-| 0 + 1（当前 PR） | 本 ADR + 文档索引 + Eval manifest：固定 eval reference 与 sample preset | 不生成图、不算指标、不做 UI | 无 |
-| 2 | Eval sample runner：checkpoint 保存后按 manifest 对 checkpoint 出图，保存 grid / 单图 / metadata | 不接 CLIP / DINO / CMMD | 0 + 1 |
-| 3 | Metric result schema：定义 metrics.json、embedding cache 目录、API 返回格式、空状态 UI | 不实现具体指标 | 2 |
+| 0 + 1 | 本 ADR + 文档索引 + Eval manifest：固定 eval reference 与 sample preset | 不生成图、不算指标、不做 UI | 无 |
+| 2 | Eval sample runner：按 manifest 对 checkpoint 出图，保存单图与 `run.json` metadata | 不接 CLIP / DINO / CMMD | 0 + 1 |
+| 3（当前 step） | Metric result schema：定义 `metrics.json`、embedding cache 目录、API 返回格式、空状态 | 不实现具体指标 | 2 |
 | 4 | CLIP-T / CLIP-I | 不做 DINO / diversity / copy-risk | 3 |
 | 5 | DINO-I | 不改 CLIP 逻辑、不做诊断 | 3, 4 |
 | 6 | Diversity（LPIPS 或 DreamSim） | 不判断训练图复制 | 3 |
@@ -189,7 +188,7 @@ manifest 记录：
 | 9 | Diagnosis UI：汇总指标并提示拟合不足 / 过拟合 / 复制风险 | 不新增指标模型 | 4, 5, 6, 7, 8 |
 | 10 | Checkpoint ranking：基于已有指标给可追溯推荐理由 | 不改变训练默认流程 | 9 |
 
-PR2 的 sample runner 应先落地为一个可持久化、可重跑、可被后续指标读取的 eval sample run：
+Step 2 的 sample runner 应先落地为一个可持久化、可重跑、可被后续指标读取的 eval sample run：
 
 - 输入：version eval manifest、`output/` 下的一个 LoRA checkpoint，以及 version 训练配置里的模型 / runtime 默认值；
 - 调度：通过现有 `project_jobs` 增加 `eval_samples` job kind，按 GPU-bound job 处理，避免在训练 step 内同步抢资源；
@@ -197,9 +196,9 @@ PR2 的 sample runner 应先落地为一个可持久化、可重跑、可被后�
 - metadata：记录 manifest digest / snapshot、checkpoint 身份、prompt、seed、生成参数、每张图状态和 summary counts；
 - 明确不做：不计算 CLIP / DINO / SSCD / CMMD，不做 checkpoint ranking，不输出质量推荐。
 
-这样 PR2 能证明 manifest 已经成为真实跨任务契约，同时仍把指标依赖和诊断 UI 留给后续 PR。
+这样 step 2 能证明 manifest 已经成为真实跨任务契约，同时仍把指标依赖和诊断 UI 留给后续 step。
 
-每个后续 PR body 固定包含：
+每个后续 review step / commit 说明固定包含：
 
 ```md
 ## Hypothesis
@@ -215,10 +214,10 @@ PR2 的 sample runner 应先落地为一个可持久化、可重跑、可被后�
 命令、样例项目、mock、截图或指标 JSON。
 
 ## Follow-ups
-下一 PR 接什么。
+后续 step 接什么。
 ```
 
-如果某个 PR 超过约 500 行核心逻辑变化，PR body 需要解释为什么不能继续拆。
+如果某个 step 超过约 500 行核心逻辑变化，说明里需要解释为什么不能继续拆。
 
 ## 候选方案
 
@@ -275,17 +274,19 @@ PR2 的 sample runner 应先落地为一个可持久化、可重跑、可被后�
 
 ## 验收策略
 
-当前 PR（PR 0 + PR 1）的验收：
+当前 PR #138 到 step 3 为止的验收：
 
 - 新增 ADR / docs 索引；
 - 新增 version-scoped `eval/manifest.json` 服务和 API；
-- 不新增依赖；
-- 不生成样图、不计算指标、不改 UI；
+- 新增 version-scoped eval sample run 服务、API 和 `eval_samples` job kind；
+- 新增 metric result contract、`metrics.json` 位置、embedding cache layout 和 API 空状态；
+- 不新增指标模型依赖；
+- 不计算 CLIP / DINO / SSCD / CMMD，不改 UI；
 - GET manifest 不隐式写文件，POST/PUT 才落盘；
 - manifest 明确区分 eval reference 与 sample preset，并说明默认 reference 来源；
-- 实施计划明确到每个后续 PR 的范围和不在范围。
+- 实施计划明确到每个后续 step 的范围和不在范围。
 
-后续 PR 的共同验收：
+后续 step 的共同验收：
 
 - 每个 PR 独立可运行 / 可展示；
 - 新指标必须有 mock 或小样例测试；
