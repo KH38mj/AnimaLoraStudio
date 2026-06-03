@@ -5,7 +5,7 @@
 **决策者**：@WalkingMeatAxolotl
 
 > **维护约定**：本 ADR 定义 LoRA checkpoint validation metrics 的目标、边界和可审查实现步骤。
-> 维护者已反馈这组 eval 能力可以作为同一个功能在 PR #138 内连续测试和审查；因此当前实现用多个小 commit / follow-up step 叠在同一个 PR 中推进，仍保持每一步边界清晰。
+> PR #138 只承载 eval foundation：manifest、sample runner 与 metric result contract。具体指标从 CLIP-T / CLIP-I 开始拆成独立 stacked PR，PR body 明确写 `Depends on #138` 与 base branch，避免把模型依赖、指标实现、UI 和诊断逻辑继续塞进同一个 foundation PR。
 > 如果后续指标实测与本文假设冲突，在末尾追加 Addendum，不改写初版决策。
 
 ## 背景
@@ -173,14 +173,14 @@ manifest 记录：
 
 ### 可审查实现步骤
 
-吸取 PR #18 的经验，禁止把评估体系做成一个无法审查的大块。即使维护者希望当前 eval feature 保持在同一个 PR #138 中测试和合并，每个 commit / follow-up step 仍只回答一个问题，尽量只引入一个新概念、依赖或指标。
+吸取 PR #18 的经验，禁止把评估体系做成一个无法审查的大块。PR #138 固定为 foundation PR；后续指标、UI 和 checkpoint ranking 均拆成 stacked PR。每个 PR 只回答一个问题，尽量只引入一个新概念、依赖或指标。
 
 | Step | 范围 | 明确不做 | 阻塞关系 |
 |---|---|---|---|
 | 0 + 1 | 本 ADR + 文档索引 + Eval manifest：固定 eval reference 与 sample preset | 不生成图、不算指标、不做 UI | 无 |
 | 2 | Eval sample runner：按 manifest 对 checkpoint 出图，保存单图与 `run.json` metadata | 不接 CLIP / DINO / CMMD | 0 + 1 |
 | 3（当前 step） | Metric result schema：定义 `metrics.json`、embedding cache 目录、API 返回格式、空状态 | 不实现具体指标 | 2 |
-| 4 | CLIP-T / CLIP-I | 不做 DINO / diversity / copy-risk | 3 |
+| 4（当前 stacked PR） | CLIP-T / CLIP-I：新增 `eval_clip` job，读取 sample run 与 manifest reference，写入 `metrics.json` 的 `clip_t` / `clip_i` | 不做 DINO / diversity / copy-risk / paired CMMD²，不做 UI，不做 checkpoint ranking | 3 / PR #138 |
 | 5 | DINO-I | 不改 CLIP 逻辑、不做诊断 | 3, 4 |
 | 6 | Diversity（LPIPS 或 DreamSim） | 不判断训练图复制 | 3 |
 | 7 | SSCD copy-risk：nearest-neighbor 相似度、高风险比例、对照图 | 不做综合评分 | 3 |
@@ -197,6 +197,15 @@ Step 2 的 sample runner 应先落地为一个可持久化、可重跑、可被�
 - 明确不做：不计算 CLIP / DINO / SSCD / CMMD，不做 checkpoint ranking，不输出质量推荐。
 
 这样 step 2 能证明 manifest 已经成为真实跨任务契约，同时仍把指标依赖和诊断 UI 留给后续 step。
+
+Step 4 的 CLIP runner 应先落地为一个最小可复用指标 job：
+
+- 输入：已完成的 eval sample run、run 内冻结的 manifest snapshot、generated images、对应 prompt 与 reference image；
+- 调度：通过 `project_jobs` 新增 `eval_clip` job kind，并按 GPU-bound job 处理，避免默认与训练并行抢显存；
+- 输出：写回同一个 `metrics.json`，只更新 `clip_t` / `clip_i` 与对应 `metric_states`，不得覆盖 DINO / diversity / SSCD / CMMD 等其他指标结果；
+- 缓存：在 `eval/cache/embeddings/clip/` 写 generated / text / reference embeddings 与 metadata，便于后续同 checkpoint 或同 reference 复用；
+- 降级：缺模型、缺依赖、缺 reference 或缺 prompt 时，把对应 metric 标为 `failed` 或 `unavailable`，不影响 sample run 与其他 metric；
+- 明确不做：不改 UI、不做 DINO、不做 copy-risk、不自动推荐 checkpoint。
 
 每个后续 review step / commit 说明固定包含：
 
