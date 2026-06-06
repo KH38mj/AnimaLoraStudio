@@ -182,12 +182,13 @@ manifest 记录：
 | 3 | Metric result schema：定义 `metrics.json`、embedding cache 目录、API 返回格式、空状态 | 不实现具体指标 | 2 |
 | 4 | CLIP-T / CLIP-I：新增 `eval_clip` job，读取 sample run 与 manifest reference，写入 `metrics.json` 的 `clip_t` / `clip_i` | 不做 DINO / diversity / copy-risk / paired CMMD²，不做 UI，不做 checkpoint ranking | 3 / PR #138 |
 | 5 | DINO-I：新增 `eval_dino` job，读取 generated/reference image pairs，写入 `metrics.json` 的 `dino_i` | 不改 CLIP 逻辑、不做 diversity / copy-risk / paired CMMD²、不做诊断 UI | 3, 4 |
-| 6（当前 stacked PR） | Eval metric model settings：为 CLIP / DINO 指标保存默认模型名或本地路径，API 请求省略 `model_name` 时读取这些默认值 | 不新增下载 UI、不改指标算法、不接 diversity / copy-risk / paired CMMD²、不做诊断 UI | 4, 5 |
-| 7 | Diversity（LPIPS 或 DreamSim） | 不判断训练图复制 | 3 |
-| 8 | SSCD copy-risk：nearest-neighbor 相似度、高风险比例、对照图 | 不做综合评分 | 3 |
-| 9 | paired CMMD² | 不做 checkpoint 自动推荐 | 3, 4, 5 |
-| 10 | Diagnosis UI：汇总指标并提示拟合不足 / 过拟合 / 复制风险 | 不新增指标模型 | 4, 5, 7, 8, 9 |
-| 11 | Checkpoint ranking：基于已有指标给可追溯推荐理由 | 不改变训练默认流程 | 10 |
+| 6 | Eval metric model settings：为 CLIP / DINO 指标保存默认模型名或本地路径，API 请求省略 `model_name` 时读取这些默认值 | 不新增下载 UI、不改指标算法、不接 diversity / copy-risk / paired CMMD²、不做诊断 UI | 4, 5 |
+| 7（当前 stacked PR） | Training-integrated eval POC：训练保存 LoRA checkpoint 后自动排 eval sample，sample 完成后自动排 CLIP / DINO | 不做 polished UI、不自动给训练参数建议、不新增 diversity / copy-risk / paired CMMD²、不做 checkpoint ranking | 4, 5, 6 |
+| 8 | Diversity（LPIPS 或 DreamSim） | 不判断训练图复制 | 7 |
+| 9 | SSCD copy-risk：nearest-neighbor 相似度、高风险比例、对照图 | 不做综合评分 | 7 |
+| 10 | paired CMMD² | 不做 checkpoint 自动推荐 | 7, 8 |
+| 11 | Diagnosis UI：汇总指标并提示拟合不足 / 过拟合 / 复制风险 | 不新增指标模型 | 7, 8, 9, 10 |
+| 12 | Checkpoint ranking：基于已有指标给可追溯推荐理由 | 不改变训练默认流程 | 11 |
 
 Step 2 的 sample runner 应先落地为一个可持久化、可重跑、可被后续指标读取的 eval sample run：
 
@@ -224,6 +225,14 @@ Step 6 的 eval metric model settings 先把服务器实测过的 ModelScope / �
 - 输出：保存到 secrets 配置，metric job params 与 `metric_states.*.model_name` 记录实际使用的模型值；
 - 兼容：手动 API 请求仍可传 `model_name` 覆盖默认值，便于单次实验；
 - 明确不做：不新增模型下载 UI、不改变 CLIP / DINO 指标算法、不做 diversity / copy-risk / paired CMMD²、不做 checkpoint ranking。
+
+Step 7 的 training-integrated eval POC 用已有 CLIP / DINO 指标回答“同一训练过程里的不同 checkpoint 能否被区分”：
+
+- 触发：训练保存 LoRA checkpoint（step / epoch / final）时 emit `eval_checkpoint_saved` 结构化事件；
+- 调度：Studio supervisor 在 POC 开关开启时，把该 checkpoint 排入 `eval_samples` job；GPU-bound job 仍按现有队列策略排队，默认不与训练并行抢显存；
+- 串联：自动排队的 sample run 成功后，继续排 `eval_clip` 与 `eval_dino`，模型路径读取 Step 6 的 Settings 默认值；
+- 输出：每个 checkpoint 仍产生普通 `eval/samples/{run_id}/run.json` 与同目录 `metrics.json`，不引入单独的实验结果格式；
+- 明确不做：不根据指标自动修改训练参数，不新增正式 monitor UI，不新增新指标，不做 ranking。
 
 每个后续 review step / commit 说明固定包含：
 
