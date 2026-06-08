@@ -340,3 +340,37 @@ Step 7 的 training-integrated eval POC 用已有 CLIP / DINO 指标回答“同
 - DreamBooth / DreamBench 系列：DINO-I / CLIP-I / CLIP-T 常用于个性化生成评估。
 - Rethinking FID：CMMD 使用 CLIP embedding + MMD 替代 FID 的高斯假设。
 - SSCD：图像 copy detection，可作为训练图复制风险的 nearest-neighbor 特征模型。
+
+## Addendum: Step 7 真实训练验证记录（2026-06-08）
+
+Step 7 的 training-integrated eval POC 已在真实训练项目
+`27-olecafe/v1` 上完成验证。用户在 Settings 中开启“保存 LoRA 后自动评估”，
+`auto_eval_max_items=1`，并使用服务器本地模型路径：
+
+- CLIP：`/notebook/lora/AnimaLoraStudio/models/clip-ViT-B-32/0_CLIPModel`
+- DINO：`/notebook/lora/AnimaLoraStudio/models/facebook/dinov2-small`
+
+验证结果：
+
+- 训练过程中保存出的所有 LoRA checkpoint 都自动生成了 eval run；
+- 截图中可见的后段 checkpoint 包括 epoch 24、26、28、30 和最终 `other` LoRA；
+- 可见 run 均写入 `metrics.json`，且 `CLIP-T`、`CLIP-I`、`DINO-I` 均达到 `done`；
+- 因此当前 POC 已证明 eval 链路接入真实训练 checkpoint 保存流程，而不是只对单个 LoRA 做手动评估。
+
+可见样例值：
+
+| Checkpoint | CLIP-T | CLIP-I | DINO-I |
+|---|---:|---:|---:|
+| epoch 24 | 0.0674673318862915 | 0.9044230580329895 | 0.8840205073356628 |
+| epoch 26 | 0.08806681632995605 | 0.891954779624939 | 0.82061368227005 |
+| epoch 28 | 0.08906453847885132 | 0.9027907848358154 | 0.8719749450683594 |
+| epoch 30 | 0.07745270431041718 | 0.8997145891189575 | 0.8682695031166077 |
+| final / other | 0.07745270431041718 | 0.8997145891189575 | 0.8682695031166077 |
+
+验证中同时确认：`versions/v1/monitor/task_57/samples` 下的图片属于原有训练
+monitor sample 功能，不是本 POC 的 eval sample-run 输出。因此 Step 7 的验收范围仍
+聚焦于 checkpoint 保存后自动生成 eval run 并完成 CLIP / DINO 指标，不把关联原训练
+monitor sample 图作为当前 PR 的必要收尾项。
+
+后续仍需补充或量化的风险是 GPU 显存与调度行为：CLIP / DINO 模型较大，当前 POC 应
+明确 eval job 是否可能与训练并行运行，以及服务器实测中的显存峰值。
