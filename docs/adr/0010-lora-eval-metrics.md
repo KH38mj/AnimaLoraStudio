@@ -372,5 +372,7 @@ monitor sample 功能，不是本 POC 的 eval sample-run 输出。因此 Step 7
 聚焦于 checkpoint 保存后自动生成 eval run 并完成 CLIP / DINO 指标，不把关联原训练
 monitor sample 图作为当前 PR 的必要收尾项。
 
-后续仍需补充或量化的风险是 GPU 显存与调度行为：CLIP / DINO 模型较大，当前 POC 应
-明确 eval job 是否可能与训练并行运行，以及服务器实测中的显存峰值。
+显存补测结果：用户随后在服务器上进行短训练验证，开启自动评估后观察到 GPU 显存峰值
+没有超过训练本身的最大显存占用。该结果说明当前 POC 在这轮实测中没有额外推高整体峰值，
+但后续若改变队列并发策略、eval sample 数量、分辨率或启用更多指标，仍应重新量化显存
+行为。
