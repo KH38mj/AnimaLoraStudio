@@ -376,3 +376,10 @@ monitor sample 图作为当前 PR 的必要收尾项。
 没有超过训练本身的最大显存占用。该结果说明当前 POC 在这轮实测中没有额外推高整体峰值，
 但后续若改变队列并发策略、eval sample 数量、分辨率或启用更多指标，仍应重新量化显存
 行为。
+
+2026-06-11 追加验证发现：`28-xi410/v1` 这类长训练会一次性产生较多自动
+`eval_samples` job。原先 `project_jobs` 纯按 job id FIFO 调度，导致已完成 sample
+后排出的 `eval_clip` / `eval_dino` 可能被后续大量 `eval_samples` 堵在队列后面，用户
+需要等待更多采样完成后才能看到已经可计算的指标。对应修复是让 eval metric job
+优先于后续 eval sample job 调度，并把 `auto_metrics` / `auto_source` 写入 run metadata，
+方便后续 UI 和排障直接从 `run.json` 判断自动评估来源。
