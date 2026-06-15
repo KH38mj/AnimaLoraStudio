@@ -713,6 +713,7 @@
     "tabOverview": "Overview",
     "tabLogs": "Logs",
     "tabMonitor": "Monitor",
+    "tabEval": "LoRA eval",
     "tabOutputs": "Outputs",
     "tabSnapshot": "Snapshot config",
     "deleteRecord": "Delete record",
